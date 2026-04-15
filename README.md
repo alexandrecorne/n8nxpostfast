@@ -38,24 +38,36 @@ The deploy script can't do this one for you — n8n's public API doesn't accept 
 3. Open the Notion page [Shorts EO — Weekly Posting Planning](https://www.notion.so/34028224657180d8951bcc555a2c66b8) → `⋯` menu → **Connections → Connect to →** your new integration.
 4. In n8n UI: **Credentials → + Add credential → Notion API**, paste the secret, name it exactly `Notion API` (the script searches for this name).
 
-### 2. Deploy — one command
+### 2. Grab the Notion credential UUID from the n8n UI
+
+n8n's public API has no `GET /credentials` endpoint — you can create and delete credentials but not list them. So we can't auto-discover the Notion credential ID. Copy it once, pass it as an env var.
+
+1. Open `http://72.62.187.71:5678/home/credentials`
+2. Click the `Notion API` credential you just created
+3. The URL becomes `.../home/credentials/<uuid>` — copy that UUID
+
+### 3. Deploy — one command
 
 ```bash
 export N8N_API_KEY="eyJhbGciOi..."                # Settings → n8n API → Create API Key
-export POSTFAST_API_KEY="tuk7TzAI..."             # Workspace Settings → API (PostFast)
+export POSTFAST_API_KEY="tuk7TzAI..."             # PostFast workspace settings → API
+export NOTION_CRED_ID="<uuid from step 2>"
 export N8N_PROJECT_ID="bnK2w5BUU8YLwyol"          # optional
-export TARGET_WORKFLOW_ID="VztWOvTejsjBV4Vh8tL2o" # optional: overwrite the empty workflow already opened in the UI
+export TARGET_WORKFLOW_ID="VztWOvTejsjBV4Vh8tL2o" # optional: overwrite the empty workflow you already have open
 
 bash scripts/deploy-to-n8n.sh
 ```
 
 The script:
-- **Auto-creates** the `PostFast API` Header Auth credential (`pf-api-key: ${POSTFAST_API_KEY}`) if it doesn't exist.
-- **Reuses** an existing `Notion API` credential (fails loud if missing).
+- **Pings** the n8n API first to catch auth/URL mistakes early.
+- **Creates a fresh `PostFast API` Header Auth credential** (`pf-api-key: ${POSTFAST_API_KEY}`) on every run, unless you pass `POSTFAST_CRED_ID=<uuid>` to reuse one.
 - **Substitutes** both credential IDs into the workflow JSON on the fly.
-- **Overwrites** the target workflow (via `TARGET_WORKFLOW_ID`) or creates a new one.
+- **Overwrites** the target workflow (via `TARGET_WORKFLOW_ID` or name lookup) or creates a new one.
+- **Transfers** freshly-created workflows into the project set by `N8N_PROJECT_ID` (ignored on Community edition).
 
-Re-run the script any time you edit `workflows/eo-shorts-auto-publisher.json` — it's fully idempotent.
+If the PostFast credential creation fails with a "duplicate name" error, the script prints exact instructions to copy the existing credential's UUID and re-run with `POSTFAST_CRED_ID=<uuid>`.
+
+Run the script with `DEBUG=1` to see every request (`set -x`).
 
 ### 3. Test E2E
 
