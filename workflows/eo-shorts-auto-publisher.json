@@ -66,7 +66,7 @@
         "filters": {
           "conditions": [
             {
-              "key": "Back-up|status",
+              "key": "Kind|status",
               "condition": "equals",
               "statusValue": "Ready"
             },
@@ -162,7 +162,7 @@
         "propertiesUi": {
           "propertyValues": [
             {
-              "key": "Back-up|status",
+              "key": "Kind|status",
               "statusValue": "Posted"
             }
           ]
