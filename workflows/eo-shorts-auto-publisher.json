@@ -21,7 +21,7 @@
     {
       "parameters": {
         "method": "GET",
-        "url": "https://api.postfa.st/social-accounts",
+        "url": "https://api.postfa.st/social-media/my-social-accounts",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {}
@@ -42,7 +42,7 @@
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
-        "jsCode": "// Build a platformKey → socialMediaId map from PostFast's /social-accounts response.\n// PostFast returns either a bare array of account objects, or {data: [...]} — handle both.\n// Each account has at least { id, platform } where platform is a string like\n// 'INSTAGRAM', 'TIKTOK', 'YOUTUBE', 'LINKEDIN', 'X', 'TWITTER', etc.\n\nconst raw = $input.all().map(i => i.json);\nlet accounts = raw;\n// If n8n got a single object with a data/items/results array, unwrap it.\nif (raw.length === 1 && raw[0] && typeof raw[0] === 'object') {\n  if (Array.isArray(raw[0].data)) accounts = raw[0].data.map(a => a);\n  else if (Array.isArray(raw[0].items)) accounts = raw[0].items.map(a => a);\n  else if (Array.isArray(raw[0].results)) accounts = raw[0].results.map(a => a);\n}\n\nconst platformMap = {};\nconst summary = [];\nfor (const acc of accounts) {\n  if (!acc || !acc.id) continue;\n  const platform = String(acc.platform || acc.provider || '').toUpperCase();\n  if (!platform) continue;\n  platformMap[platform] = acc.id;\n  summary.push({ platform, id: acc.id, handle: acc.handle || acc.name || null });\n}\n\nreturn [{ json: { platformMap, summary, rawCount: accounts.length } }];\n"
+        "jsCode": "// PostFast returns either a raw array of account objects, or {data: [...]},\n// depending on version. Normalise both into a platform → socialMediaId map.\n\nconst raw = $input.all().map(i => i.json);\nlet accounts = raw;\nif (raw.length === 1 && raw[0] && typeof raw[0] === 'object') {\n  if (Array.isArray(raw[0].data)) accounts = raw[0].data;\n  else if (Array.isArray(raw[0].items)) accounts = raw[0].items;\n  else if (Array.isArray(raw[0].results)) accounts = raw[0].results;\n}\n\nconst platformMap = {};\nconst summary = [];\nfor (const acc of accounts) {\n  if (!acc || !acc.id) continue;\n  const platform = String(acc.platform || acc.provider || '').toUpperCase();\n  if (!platform) continue;\n  platformMap[platform] = acc.id;\n  summary.push({ platform, id: acc.id, handle: acc.handle || acc.name || null });\n}\n\nreturn [{ json: { platformMap, summary, rawCount: accounts.length } }];\n"
       },
       "id": "b1a1c5e0-0003-4000-8000-000000000003",
       "name": "Code — Build Platform Map",
@@ -99,10 +99,10 @@
       "parameters": {
         "mode": "runOnceForEachItem",
         "language": "javaScript",
-        "jsCode": "// For each Notion short, parse its Description into per-platform captions,\n// resolve each platform to a PostFast socialMediaId via the map built upstream,\n// and emit one item containing the full POST body for /social-posts.\n//\n// Description format example (each block starts on its own line, separated by blanks):\n//   YT: Caption for YouTube Shorts ... | Tags: k1, k2\n//   SM: Caption for Instagram + TikTok (same text) ...\n//   LI: LinkedIn caption ...\n//   X: Caption for X/Twitter ...\n\nconst PREFIX_TO_PLATFORMS = {\n  YT: ['YOUTUBE'],\n  SM: ['INSTAGRAM', 'TIKTOK'],\n  LI: ['LINKEDIN'],\n  X:  ['X', 'TWITTER'], // match either naming\n};\n\nconst platformMap = $('Code — Build Platform Map').first().json.platformMap || {};\n\nconst extractText = (v) => {\n  if (v == null) return '';\n  if (typeof v === 'string') return v;\n  if (Array.isArray(v)) return v.map(r => r.plain_text || r.text?.content || r.text || '').join('');\n  if (typeof v === 'object') {\n    if (v.plain_text) return v.plain_text;\n    if (typeof v.text === 'string') return v.text;\n    if (Array.isArray(v.title)) return v.title.map(r => r.plain_text || '').join('');\n    if (Array.isArray(v.rich_text)) return v.rich_text.map(r => r.plain_text || '').join('');\n  }\n  return String(v ?? '');\n};\n\nconst extractDate = (v) => {\n  if (!v) return null;\n  if (typeof v === 'string') return v;\n  if (v.start) return v.start;\n  if (v.date && v.date.start) return v.date.start;\n  return null;\n};\n\nconst props = $json.properties || $json;\nconst titleText = extractText(props['Titre']);\nconst descText = extractText(props['Description']);\nconst dateRaw = extractDate(props['Date de Publication']);\nconst notionPageId = $json.id || ($json.url && $json.url.split('/').pop().split('?')[0]) || '';\n\nif (!dateRaw) {\n  throw new Error(`Short \"${titleText}\" (id=${notionPageId}) has no Date de Publication.`);\n}\n\n// Shorts with only a date (no time) default to 09:00 UTC.\n// Adjust here if you want a different hour/timezone.\nconst scheduledAt = /T\\d/.test(dateRaw)\n  ? new Date(dateRaw).toISOString()\n  : new Date(`${dateRaw}T09:00:00.000Z`).toISOString();\n\n// Split the description into prefixed blocks.\nconst BLOCK_REGEX = /(^|\\n)\\s*(YT|SM|LI|X)\\s*:\\s*/g;\nconst matches = [];\nlet m;\nwhile ((m = BLOCK_REGEX.exec(descText)) !== null) {\n  matches.push({ prefix: m[2], start: m.index + m[0].length });\n}\nif (matches.length === 0) {\n  throw new Error(`Short \"${titleText}\" (id=${notionPageId}) has no YT:/SM:/LI:/X: blocks in its Description.`);\n}\n\nconst blocks = [];\nfor (let i = 0; i < matches.length; i++) {\n  const end = i + 1 < matches.length\n    ? matches[i + 1].start - matches[i + 1].prefix.length - 2\n    : descText.length;\n  let caption = descText.slice(matches[i].start, end).trim();\n  // Strip trailing \"| Tags: ...\" marker that only the YT block carries.\n  caption = caption.replace(/\\s*\\|\\s*Tags\\s*:.*$/is, '').trim();\n  blocks.push({ prefix: matches[i].prefix, caption });\n}\n\n// Build posts array.\nconst posts = [];\nconst missingPlatforms = [];\nfor (const { prefix, caption } of blocks) {\n  const platforms = PREFIX_TO_PLATFORMS[prefix] || [];\n  // SM fans out to INSTAGRAM + TIKTOK; other prefixes map 1:1.\n  for (const p of platforms) {\n    const socialMediaId = platformMap[p];\n    if (!socialMediaId) {\n      missingPlatforms.push(p);\n      continue;\n    }\n    posts.push({\n      content: caption,\n      scheduledAt,\n      socialMediaId,\n    });\n    // Break after first match for prefixes that accept either X or TWITTER naming.\n    if (prefix === 'X' && (p === 'X' || p === 'TWITTER')) break;\n  }\n}\n\nif (posts.length === 0) {\n  throw new Error(`Short \"${titleText}\" (id=${notionPageId}): no posts could be built. Missing platforms: ${missingPlatforms.join(', ') || 'none'}. platformMap=${JSON.stringify(platformMap)}`);\n}\n\nreturn {\n  json: {\n    notionPageId,\n    titleText,\n    scheduledAt,\n    postCount: posts.length,\n    missingPlatforms,\n    body: {\n      posts,\n      controls: {},\n    },\n  },\n};\n"
+        "jsCode": "// Explode each Notion short into one item per (platform-post).\n// Each output item is a FULLY FORMED PostFast POST /social-posts body\n// with platform-specific `controls` — because PostFast applies controls\n// to every post in the batch, so we can't mix platforms in one call.\n//\n// Expected Notion properties:\n//   Titre (title)\n//   Description (text with YT:/SM:/LI:/X: prefixed blocks)\n//   Date de Publication (date)\n//   PostFast Media Key (text, e.g. 'video/<uuid>.mp4') — REQUIRED\n\nconst PLATFORM_CONFIG = {\n  YT: [\n    { platform: 'YOUTUBE', controls: { youtubeIsShort: true } }\n  ],\n  SM: [\n    { platform: 'INSTAGRAM', controls: { instagramPublishType: 'REEL', instagramPostToGrid: true } },\n    { platform: 'TIKTOK',    controls: { tiktokPrivacy: 'PUBLIC', tiktokAllowComments: true, tiktokAllowDuet: true } }\n  ],\n  LI: [\n    { platform: 'LINKEDIN', controls: {} }\n  ],\n  X: [\n    { platform: 'X',        controls: {} }\n  ],\n};\n\nconst platformMap = $('Code — Build Platform Map').first().json.platformMap || {};\n\nconst extractText = (v) => {\n  if (v == null) return '';\n  if (typeof v === 'string') return v;\n  if (Array.isArray(v)) return v.map(r => r.plain_text || r.text?.content || r.text || '').join('');\n  if (typeof v === 'object') {\n    if (v.plain_text) return v.plain_text;\n    if (typeof v.text === 'string') return v.text;\n    if (Array.isArray(v.title)) return v.title.map(r => r.plain_text || '').join('');\n    if (Array.isArray(v.rich_text)) return v.rich_text.map(r => r.plain_text || '').join('');\n  }\n  return String(v ?? '');\n};\n\nconst extractDate = (v) => {\n  if (!v) return null;\n  if (typeof v === 'string') return v;\n  if (v.start) return v.start;\n  if (v.date && v.date.start) return v.date.start;\n  return null;\n};\n\nconst props = $json.properties || $json;\nconst titleText = extractText(props['Titre']);\nconst descText = extractText(props['Description']);\nconst dateRaw = extractDate(props['Date de Publication']);\nconst mediaKey = extractText(props['PostFast Media Key']).trim();\nconst notionPageId = $json.id || ($json.url && $json.url.split('/').pop().split('?')[0]) || '';\n\nif (!dateRaw) {\n  throw new Error(`Short \"${titleText}\" (id=${notionPageId}) has no Date de Publication.`);\n}\nif (!mediaKey) {\n  throw new Error(`Short \"${titleText}\" (id=${notionPageId}) has no 'PostFast Media Key'. Upload the video with scripts/upload-video.sh and paste the returned key (format: video/<uuid>.mp4) into the Notion property.`);\n}\n\n// Default post time = 09:00 UTC on the publication date.\nconst scheduledAt = /T\\d/.test(dateRaw)\n  ? new Date(dateRaw).toISOString()\n  : new Date(`${dateRaw}T09:00:00.000Z`).toISOString();\n\nconst mediaItems = [\n  { key: mediaKey, type: 'VIDEO', sortOrder: 0, coverTimestamp: '2000' }\n];\n\n// Split Description into per-prefix blocks.\nconst BLOCK_REGEX = /(^|\\n)\\s*(YT|SM|LI|X)\\s*:\\s*/g;\nconst matches = [];\nlet m;\nwhile ((m = BLOCK_REGEX.exec(descText)) !== null) {\n  matches.push({ prefix: m[2], start: m.index + m[0].length });\n}\nif (matches.length === 0) {\n  throw new Error(`Short \"${titleText}\" (id=${notionPageId}) has no YT:/SM:/LI:/X: blocks in its Description.`);\n}\n\nconst blocks = [];\nfor (let i = 0; i < matches.length; i++) {\n  const end = i + 1 < matches.length\n    ? matches[i + 1].start - matches[i + 1].prefix.length - 2\n    : descText.length;\n  let caption = descText.slice(matches[i].start, end).trim();\n  caption = caption.replace(/\\s*\\|\\s*Tags\\s*:.*$/is, '').trim();\n  blocks.push({ prefix: matches[i].prefix, caption });\n}\n\nconst output = [];\nconst missingPlatforms = [];\nfor (const { prefix, caption } of blocks) {\n  const configs = PLATFORM_CONFIG[prefix] || [];\n  for (const { platform, controls } of configs) {\n    const socialMediaId = platformMap[platform];\n    if (!socialMediaId) {\n      missingPlatforms.push(platform);\n      continue;\n    }\n    output.push({\n      json: {\n        notionPageId,\n        titleText,\n        platform,\n        body: {\n          posts: [\n            {\n              content: caption,\n              scheduledAt,\n              socialMediaId,\n              mediaItems,\n            },\n          ],\n          controls,\n        },\n      },\n    });\n  }\n}\n\nif (output.length === 0) {\n  throw new Error(`Short \"${titleText}\" (id=${notionPageId}): no posts could be built. Missing platforms in PostFast workspace: ${missingPlatforms.join(', ') || 'none'}.`);\n}\n\nreturn output;\n"
       },
       "id": "b1a1c5e0-0005-4000-8000-000000000005",
-      "name": "Code — Build Posts Per Short",
+      "name": "Code — Explode Per Platform",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [1200, 300]
@@ -126,7 +126,7 @@
         }
       },
       "id": "b1a1c5e0-0006-4000-8000-000000000006",
-      "name": "PostFast — Schedule Posts",
+      "name": "PostFast — Schedule Post (per platform)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [1440, 300],
@@ -139,11 +139,23 @@
     },
     {
       "parameters": {
+        "operation": "removeDuplicates",
+        "compare": "selectedFields",
+        "fieldsToCompare": "notionPageId"
+      },
+      "id": "b1a1c5e0-0007-4000-8000-000000000007",
+      "name": "Deduplicate by Notion Page ID",
+      "type": "n8n-nodes-base.itemLists",
+      "typeVersion": 3.1,
+      "position": [1680, 300]
+    },
+    {
+      "parameters": {
         "resource": "databasePage",
         "operation": "update",
         "pageId": {
           "__rl": true,
-          "value": "={{ $('Code — Build Posts Per Short').item.json.notionPageId }}",
+          "value": "={{ $json.notionPageId }}",
           "mode": "id"
         },
         "simple": true,
@@ -156,11 +168,11 @@
           ]
         }
       },
-      "id": "b1a1c5e0-0007-4000-8000-000000000007",
+      "id": "b1a1c5e0-0008-4000-8000-000000000008",
       "name": "Notion — Mark as Posted",
       "type": "n8n-nodes-base.notion",
       "typeVersion": 2.2,
-      "position": [1680, 300],
+      "position": [1920, 300],
       "credentials": {
         "notionApi": {
           "id": "REPLACE_WITH_NOTION_CRED_ID",
@@ -171,46 +183,25 @@
   ],
   "connections": {
     "Schedule Trigger (weekly Sun 20:00)": {
-      "main": [
-        [
-          { "node": "PostFast — Fetch Social Accounts", "type": "main", "index": 0 }
-        ]
-      ]
+      "main": [[{ "node": "PostFast — Fetch Social Accounts", "type": "main", "index": 0 }]]
     },
     "PostFast — Fetch Social Accounts": {
-      "main": [
-        [
-          { "node": "Code — Build Platform Map", "type": "main", "index": 0 }
-        ]
-      ]
+      "main": [[{ "node": "Code — Build Platform Map", "type": "main", "index": 0 }]]
     },
     "Code — Build Platform Map": {
-      "main": [
-        [
-          { "node": "Notion — Query Shorts (Ready, this week)", "type": "main", "index": 0 }
-        ]
-      ]
+      "main": [[{ "node": "Notion — Query Shorts (Ready, this week)", "type": "main", "index": 0 }]]
     },
     "Notion — Query Shorts (Ready, this week)": {
-      "main": [
-        [
-          { "node": "Code — Build Posts Per Short", "type": "main", "index": 0 }
-        ]
-      ]
+      "main": [[{ "node": "Code — Explode Per Platform", "type": "main", "index": 0 }]]
     },
-    "Code — Build Posts Per Short": {
-      "main": [
-        [
-          { "node": "PostFast — Schedule Posts", "type": "main", "index": 0 }
-        ]
-      ]
+    "Code — Explode Per Platform": {
+      "main": [[{ "node": "PostFast — Schedule Post (per platform)", "type": "main", "index": 0 }]]
     },
-    "PostFast — Schedule Posts": {
-      "main": [
-        [
-          { "node": "Notion — Mark as Posted", "type": "main", "index": 0 }
-        ]
-      ]
+    "PostFast — Schedule Post (per platform)": {
+      "main": [[{ "node": "Deduplicate by Notion Page ID", "type": "main", "index": 0 }]]
+    },
+    "Deduplicate by Notion Page ID": {
+      "main": [[{ "node": "Notion — Mark as Posted", "type": "main", "index": 0 }]]
     }
   },
   "settings": {
