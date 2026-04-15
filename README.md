@@ -61,13 +61,15 @@ The workflow reads the endpoint from `$env.POSTFAST_API_URL` so that you can rot
 ## Deploy
 
 ```bash
-export N8N_API_KEY="eyJhbGciOi..."   # from step 1
+export N8N_API_KEY="eyJhbGciOi..."              # from step 1
+export N8N_PROJECT_ID="bnK2w5BUU8YLwyol"        # optional: project scope
 # optional: export N8N_BASE_URL="http://72.62.187.71:5678"
+# optional: export TARGET_WORKFLOW_ID="VztWOvTejsjBV4Vh8tL2o"  # overwrite a specific existing workflow
 
 bash scripts/deploy-to-n8n.sh
 ```
 
-The script is idempotent: first run POSTs the workflow and prints its ID; subsequent runs PUT the updated definition over the existing one.
+The script is idempotent: first run POSTs the workflow and prints its ID; subsequent runs PUT the updated definition over the existing one. Set `TARGET_WORKFLOW_ID` to overwrite a specific workflow you already opened in the UI (e.g. the empty workflow you created at `/workflow/<id>`).
 
 After deployment, open the workflow in the n8n UI to **(a)** map the two Notion nodes to your `Notion API` credential, **(b)** map the HTTP node to your `PostFast API` credential, then **(c)** run once manually to validate. Finally toggle the workflow Active.
 
