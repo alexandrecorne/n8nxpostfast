@@ -1,81 +1,65 @@
 # EO Shorts Auto-Publisher
 
-Weekly n8n workflow that reads "Ready" shorts from the Notion planning DB, fans them out to PostFast on all target social platforms, and marks them as "Posted" in Notion.
+Weekly n8n workflow that reads "Ready" shorts from the Notion planning DB, schedules them on every target social platform via the PostFast API, and marks them as "Posted" in Notion.
 
-## What it does
+## Pipeline
 
 Every Sunday at 20:00 (Europe/Paris):
 
-1. **Schedule Trigger** fires the run.
-2. **Notion — Query Shorts** returns every page in the [Shorts EO — Weekly Posting Planning](https://www.notion.so/34028224657180d8951bcc555a2c66b8) database where `Back-up = Ready` and `Date de Publication` falls in the next 7 days.
-3. **Code — Explode Platforms** parses the `Description` field, which contains per-platform captions prefixed by `YT:`, `SM:`, `LI:`, `X:`. It emits one item per (short × platform), expanding `SM` into both `instagram` and `tiktok`. A short with all four prefixes produces **5 PostFast posts**.
-4. **HTTP — PostFast Schedule** POSTs each item to the PostFast scheduling API.
-5. **Deduplicate by Notion Page ID** collapses back to one item per short.
-6. **Notion — Mark as Posted** flips `Back-up` from `Ready` to `Posted`.
+```
+Schedule → PostFast GET /social-accounts → Code: build platform map
+        → Notion Query (Ready, this week) → Code: build posts per short
+        → PostFast POST /social-posts → Notion: mark as Posted
+```
 
-```
-Schedule → Notion Query → Code (parse) → HTTP PostFast → Dedup → Notion Update
-```
+1. **Schedule Trigger** — weekly cron `0 20 * * 0`.
+2. **PostFast — Fetch Social Accounts** — `GET https://api.postfa.st/social-accounts` with `pf-api-key` header, returns every connected account (YouTube, TikTok, Instagram, LinkedIn, X) with its UUID.
+3. **Code — Build Platform Map** — turns the response into `{ YOUTUBE: <uuid>, TIKTOK: <uuid>, INSTAGRAM: <uuid>, LINKEDIN: <uuid>, X: <uuid> }`.
+4. **Notion — Query Shorts** — returns every page in the [Shorts EO — Weekly Posting Planning](https://www.notion.so/34028224657180d8951bcc555a2c66b8) DB where `Back-up = Ready` and `Date de Publication` falls in the next 7 days.
+5. **Code — Build Posts Per Short** — parses the `Description` field (which is structured with `YT:` / `SM:` / `LI:` / `X:` prefixes), fans `SM` out to both `INSTAGRAM` and `TIKTOK`, resolves each platform to a `socialMediaId` via the map, and produces the full PostFast POST body `{ posts: [...], controls: {} }`. A short with all four prefixes produces **5 PostFast posts** (1 YT + 1 IG + 1 TikTok + 1 LI + 1 X).
+6. **PostFast — Schedule Posts** — `POST https://api.postfa.st/social-posts` once per short, with the batched body from step 5.
+7. **Notion — Mark as Posted** — flips `Back-up` from `Ready` to `Posted`.
 
 ## Files
 
 | Path | Purpose |
 |---|---|
 | `workflows/eo-shorts-auto-publisher.json` | n8n workflow definition (source of truth, versioned here) |
-| `scripts/deploy-to-n8n.sh` | Deploys the JSON to `http://72.62.187.71:5678` via the n8n REST API |
+| `scripts/deploy-to-n8n.sh` | Idempotent deploy: auto-creates the PostFast credential, resolves Notion credential, substitutes IDs, POSTs or PUTs the workflow |
 
 ## One-time setup
 
-### 1. Generate an n8n API key
+### 1. Create the Notion integration + credential
 
-1. Open `http://72.62.187.71:5678`.
-2. **Settings → n8n API → Create an API key**.
-3. Copy the JWT token (shown only once).
+The deploy script can't do this one for you — n8n's public API doesn't accept credentials of type `notionApi` through the CLI (the OAuth/token flow is UI-bound).
 
-### 2. Create the Notion integration + credential
-
-1. Go to <https://www.notion.so/my-integrations> → **+ New integration**, workspace-internal, read + update permissions.
+1. Go to <https://www.notion.so/my-integrations> → **+ New integration**, workspace-internal, with **Read + Update content** capabilities.
 2. Copy the **Internal Integration Secret**.
-3. Open the Notion page [Shorts EO — Weekly Posting Planning](https://www.notion.so/34028224657180d8951bcc555a2c66b8) → `⋯` menu → **Connections → Add connection →** your new integration.
-4. In n8n: **Credentials → New → Notion API**, paste the secret, name it `Notion API`.
+3. Open the Notion page [Shorts EO — Weekly Posting Planning](https://www.notion.so/34028224657180d8951bcc555a2c66b8) → `⋯` menu → **Connections → Connect to →** your new integration.
+4. In n8n UI: **Credentials → + Add credential → Notion API**, paste the secret, name it exactly `Notion API` (the script searches for this name).
 
-### 3. Create the PostFast HTTP Header Auth credential
-
-In n8n: **Credentials → New → Header Auth**.
-
-| Field | Value |
-|---|---|
-| Credential name | `PostFast API` |
-| Header Name | `Authorization` |
-| Header Value | `Bearer KWn4JvZyT6HwerFf+SPdFX56OiIhuykHJmGGfWsnmpg=` |
-
-### 4. Set the PostFast endpoint variable
-
-The workflow reads the endpoint from `$env.POSTFAST_API_URL` so that you can rotate it without editing the JSON.
-
-1. In PostFast: **Settings → API** → copy the scheduling endpoint URL.
-2. In n8n: **Settings → Variables → New variable**, key `POSTFAST_API_URL`, value = the URL from step 1.
-
-> If your n8n instance doesn't expose the Variables pane (community edition), you can inline the URL directly into the `HTTP — PostFast Schedule` node's `URL` field.
-
-## Deploy
+### 2. Deploy — one command
 
 ```bash
-export N8N_API_KEY="eyJhbGciOi..."              # from step 1
-export N8N_PROJECT_ID="bnK2w5BUU8YLwyol"        # optional: project scope
-# optional: export N8N_BASE_URL="http://72.62.187.71:5678"
-# optional: export TARGET_WORKFLOW_ID="VztWOvTejsjBV4Vh8tL2o"  # overwrite a specific existing workflow
+export N8N_API_KEY="eyJhbGciOi..."                # Settings → n8n API → Create API Key
+export POSTFAST_API_KEY="tuk7TzAI..."             # Workspace Settings → API (PostFast)
+export N8N_PROJECT_ID="bnK2w5BUU8YLwyol"          # optional
+export TARGET_WORKFLOW_ID="VztWOvTejsjBV4Vh8tL2o" # optional: overwrite the empty workflow already opened in the UI
 
 bash scripts/deploy-to-n8n.sh
 ```
 
-The script is idempotent: first run POSTs the workflow and prints its ID; subsequent runs PUT the updated definition over the existing one. Set `TARGET_WORKFLOW_ID` to overwrite a specific workflow you already opened in the UI (e.g. the empty workflow you created at `/workflow/<id>`).
+The script:
+- **Auto-creates** the `PostFast API` Header Auth credential (`pf-api-key: ${POSTFAST_API_KEY}`) if it doesn't exist.
+- **Reuses** an existing `Notion API` credential (fails loud if missing).
+- **Substitutes** both credential IDs into the workflow JSON on the fly.
+- **Overwrites** the target workflow (via `TARGET_WORKFLOW_ID`) or creates a new one.
 
-After deployment, open the workflow in the n8n UI to **(a)** map the two Notion nodes to your `Notion API` credential, **(b)** map the HTTP node to your `PostFast API` credential, then **(c)** run once manually to validate. Finally toggle the workflow Active.
+Re-run the script any time you edit `workflows/eo-shorts-auto-publisher.json` — it's fully idempotent.
 
-## Testing end-to-end
+### 3. Test E2E
 
-1. In Notion, create a **test short** with:
+1. In Notion, duplicate an existing short and set:
    - `Back-up = Ready`
    - `Date de Publication = today`
    - `Description` containing all four markers, e.g.
@@ -85,15 +69,25 @@ After deployment, open the workflow in the n8n UI to **(a)** map the two Notion 
      LI: Test caption for LinkedIn, slightly longer.
      X: Test caption for X.
      ```
-2. Open the workflow in n8n → **Execute Workflow**.
-3. Verify in the execution log that the **HTTP — PostFast Schedule** step produced **5 successful calls** (1×YT + 1×IG + 1×TikTok + 1×LI + 1×X).
-4. Verify in PostFast that 5 scheduled posts exist for today.
-5. Verify in Notion that the test page now reads `Back-up = Posted`.
-6. Delete the test short (or set it back to `Not started`) so it doesn't fire next Sunday.
+2. Open the deployed workflow → **Execute Workflow** (top-right).
+3. Inspect each node's output:
+   - `PostFast — Fetch Social Accounts` should return your connected accounts.
+   - `Code — Build Platform Map` should produce a `platformMap` with 4–5 UPPERCASE platform keys.
+   - `Code — Build Posts Per Short` should output `postCount: 5` and no `missingPlatforms`.
+   - `PostFast — Schedule Posts` should return HTTP 2xx with scheduled post IDs.
+   - `Notion — Mark as Posted` should show the page updated to `Posted`.
+4. Verify in PostFast that 5 scheduled posts exist for today across the 5 accounts.
+5. Revert the test short (or delete) so the cron doesn't re-run it Sunday.
+6. Toggle the workflow **Active**.
 
-## Known gotchas
+## Known gotchas / next iterations
 
-- **`Date de Publication` is a date, not a datetime.** The short is sent to PostFast with only the calendar date; PostFast will default to its own posting time (check your PostFast defaults). If you need a specific hour, append a time in the Code node (e.g. `scheduledAt = dateRaw + 'T09:00:00+02:00'`).
-- **PostFast API shape is an assumption.** The HTTP body sends `{ scheduledAt, caption, platform, title }`. If the actual PostFast API expects different field names, edit `jsonBody` in `HTTP — PostFast Schedule`.
-- **Videos are assumed pre-uploaded.** The workflow only schedules posts that reference videos already uploaded manually in PostFast. If PostFast requires a `mediaId` in the body, add a `PostFast Media ID` column to the Notion DB and reference it in the Code node output.
-- **`continueRegularOutput` on HTTP.** If one platform call fails (bad caption, rate limit, etc.), the remaining platforms still run, and the short is still marked Posted. If you'd rather have a failed platform block the Notion update, remove `onError` from the HTTP node and insert an `IF` before `Notion — Mark as Posted` that checks every call succeeded.
+- **No `mediaItems` yet.** PostFast may reject text-only posts on video-first platforms (YouTube Shorts, TikTok). Videos are assumed pre-uploaded in PostFast; once you know how to reference the uploaded video (its `key`), add a `PostFast Media Key` column to Notion and extend the `Code — Build Posts Per Short` node to include:
+  ```js
+  mediaItems: mediaKey ? [{ key: mediaKey, type: 'VIDEO', sortOrder: 0 }] : undefined
+  ```
+  The first E2E run will tell you exactly what PostFast expects (the HTTP Request node's output shows the raw error body).
+- **Date has no time.** `Date de Publication` is a Notion `date` (no hour). The code defaults to `09:00 UTC`. Edit `scheduledAt` logic in `Code — Build Posts Per Short` if you want another hour or a per-short time.
+- **Platform naming.** The code normalises platform strings returned by PostFast to UPPERCASE (`INSTAGRAM`, `TIKTOK`, `YOUTUBE`, `LINKEDIN`, `X`/`TWITTER`). If PostFast returns something else (`YOUTUBE_SHORTS`?), the `Code — Build Posts Per Short` node will throw with a clear `missingPlatforms` message — easy to fix.
+- **HTTP instead of HTTPS for n8n.** The script talks to n8n over plain HTTP on `http://72.62.187.71:5678`. That's fine for a deploy-from-laptop flow, but be aware the `N8N_API_KEY` travels in the clear on whatever network you run the script from. Don't run it from coffee-shop wifi; alternatively put Caddy/nginx in front of n8n and switch to HTTPS.
+- **Notion credential name is magic.** The script looks for an exact match on the credential name `Notion API`. If you name it differently, edit `NOTION_CRED_NAME` in `scripts/deploy-to-n8n.sh`.

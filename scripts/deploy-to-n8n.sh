@@ -1,33 +1,35 @@
 #!/usr/bin/env bash
 # Deploy (or update) the EO Shorts Auto-Publisher workflow to an n8n instance.
 #
+# The script is idempotent and does everything it can automatically:
+#   1. Creates/reuses a Header Auth credential named "PostFast API" (header
+#      name: pf-api-key, value: $POSTFAST_API_KEY).
+#   2. Looks up any existing credential named "Notion API".
+#   3. Substitutes the two credential IDs into the workflow JSON template.
+#   4. Creates or updates (PUT) the workflow. If TARGET_WORKFLOW_ID is set,
+#      that specific workflow is overwritten so existing UI URLs keep working.
+#   5. If N8N_PROJECT_ID is set AND a fresh workflow was created, transfers
+#      it into that project.
+#
+# The workflow is NEVER activated automatically — flip the toggle in the UI
+# once a manual run has validated end-to-end behavior.
+#
 # Required env vars:
-#   N8N_API_KEY     — JWT created in n8n UI: Settings → n8n API → Create API Key
+#   N8N_API_KEY        — JWT from n8n UI: Settings → n8n API → Create API Key
+#   POSTFAST_API_KEY   — raw PostFast API key (value for the pf-api-key header)
 #
 # Optional env vars:
-#   N8N_BASE_URL    — defaults to http://72.62.187.71:5678
-#   N8N_PROJECT_ID  — target project. If the workflow with the configured name
-#                     already exists in that project, it is updated (PUT). If
-#                     not, a new workflow is created and then moved into the
-#                     project via the /projects/:id/workflows endpoint
-#                     (only works on n8n editions that expose Projects).
-#   TARGET_WORKFLOW_ID — overrides id auto-discovery (useful when the empty
-#                     workflow already exists in the UI and you want to
-#                     overwrite THAT specific one).
+#   N8N_BASE_URL       — defaults to http://72.62.187.71:5678
+#   N8N_PROJECT_ID     — target n8n project (e.g. bnK2w5BUU8YLwyol)
+#   TARGET_WORKFLOW_ID — overwrite this specific workflow id instead of
+#                        looking up by name / creating a new one
 #
 # Usage:
 #   export N8N_API_KEY="eyJhbGciOi..."
+#   export POSTFAST_API_KEY="tuk7TzAI..."
 #   export N8N_PROJECT_ID="bnK2w5BUU8YLwyol"
-#   export TARGET_WORKFLOW_ID="VztWOvTejsjBV4Vh8tL2o"   # optional
+#   export TARGET_WORKFLOW_ID="VztWOvTejsjBV4Vh8tL2o"
 #   bash scripts/deploy-to-n8n.sh
-#
-# Behavior:
-#   - If TARGET_WORKFLOW_ID is set, PUTs directly to that id (preserves the
-#     UI URL the user already has open).
-#   - Otherwise if a workflow with the same name exists, PUTs over it.
-#   - Otherwise POSTs a new workflow.
-#   - The script never activates the workflow automatically — flip the toggle
-#     in the n8n UI once you've validated a manual execution.
 
 set -euo pipefail
 
@@ -36,95 +38,175 @@ N8N_PROJECT_ID="${N8N_PROJECT_ID:-}"
 TARGET_WORKFLOW_ID="${TARGET_WORKFLOW_ID:-}"
 WORKFLOW_FILE="$(cd "$(dirname "$0")/.." && pwd)/workflows/eo-shorts-auto-publisher.json"
 WORKFLOW_NAME="EO Shorts Auto-Publisher"
+POSTFAST_CRED_NAME="PostFast API"
+NOTION_CRED_NAME="Notion API"
 
-if [[ -z "${N8N_API_KEY:-}" ]]; then
-  echo "error: N8N_API_KEY is not set." >&2
-  echo "hint:  create one at ${N8N_BASE_URL}/settings/api" >&2
-  exit 1
+die() { echo "error: $*" >&2; exit 1; }
+
+# --- Preflight ---------------------------------------------------------------
+[[ -n "${N8N_API_KEY:-}" ]]       || die "N8N_API_KEY is not set (create one at ${N8N_BASE_URL}/settings/api)."
+[[ -n "${POSTFAST_API_KEY:-}" ]]  || die "POSTFAST_API_KEY is not set."
+[[ -f "${WORKFLOW_FILE}" ]]       || die "workflow file not found: ${WORKFLOW_FILE}"
+command -v jq >/dev/null 2>&1     || die "jq is required (install with: brew install jq  OR  apt-get install jq)."
+command -v curl >/dev/null 2>&1   || die "curl is required."
+
+AUTH_HEADER="X-N8N-API-KEY: ${N8N_API_KEY}"
+
+# --- Helper: curl wrapper that surfaces body + status ------------------------
+n8n_api() {
+  local method="$1"; shift
+  local path="$1"; shift
+  local body="${1:-}"
+  local tmp; tmp="$(mktemp)"
+  local code
+  if [[ -n "${body}" ]]; then
+    code="$(curl -sS -o "${tmp}" -w '%{http_code}' \
+      -X "${method}" \
+      -H "${AUTH_HEADER}" \
+      -H "Content-Type: application/json" \
+      --data "${body}" \
+      "${N8N_BASE_URL}${path}")"
+  else
+    code="$(curl -sS -o "${tmp}" -w '%{http_code}' \
+      -X "${method}" \
+      -H "${AUTH_HEADER}" \
+      -H "Accept: application/json" \
+      "${N8N_BASE_URL}${path}")"
+  fi
+  echo "${code}"
+  cat "${tmp}"
+  rm -f "${tmp}"
+}
+
+# --- 1. Resolve or create the PostFast credential ----------------------------
+echo "→ Resolving '${POSTFAST_CRED_NAME}' credential..."
+POSTFAST_CRED_ID="$(
+  curl -fsSL -H "${AUTH_HEADER}" -H 'Accept: application/json' \
+    "${N8N_BASE_URL}/api/v1/credentials" 2>/dev/null \
+    | jq -r --arg n "${POSTFAST_CRED_NAME}" '
+        (if type=="array" then . else (.data // []) end)
+        | map(select(.name == $n)) | .[0].id // empty'
+)"
+
+if [[ -z "${POSTFAST_CRED_ID}" ]]; then
+  echo "  ℹ not found, creating via API..."
+  CREATE_BODY="$(jq -n \
+    --arg name "${POSTFAST_CRED_NAME}" \
+    --arg value "${POSTFAST_API_KEY}" \
+    '{name: $name, type: "httpHeaderAuth", data: {name: "pf-api-key", value: $value}}')"
+  RESULT="$(n8n_api POST "/api/v1/credentials" "${CREATE_BODY}")"
+  STATUS="$(echo "${RESULT}" | head -n1)"
+  PAYLOAD="$(echo "${RESULT}" | tail -n +2)"
+  if [[ "${STATUS}" != "200" && "${STATUS}" != "201" ]]; then
+    echo "${PAYLOAD}" >&2
+    die "failed to create PostFast credential (HTTP ${STATUS})."
+  fi
+  POSTFAST_CRED_ID="$(echo "${PAYLOAD}" | jq -r '.id // .data.id')"
+  [[ -n "${POSTFAST_CRED_ID}" && "${POSTFAST_CRED_ID}" != "null" ]] || { echo "${PAYLOAD}" >&2; die "could not parse new credential id."; }
+  echo "  ✓ created credential id=${POSTFAST_CRED_ID}"
+else
+  echo "  ✓ using existing credential id=${POSTFAST_CRED_ID}"
 fi
 
-if [[ ! -f "${WORKFLOW_FILE}" ]]; then
-  echo "error: workflow file not found: ${WORKFLOW_FILE}" >&2
-  exit 1
+# --- 2. Resolve the Notion credential (manual creation required) -------------
+echo "→ Resolving '${NOTION_CRED_NAME}' credential..."
+NOTION_CRED_ID="$(
+  curl -fsSL -H "${AUTH_HEADER}" -H 'Accept: application/json' \
+    "${N8N_BASE_URL}/api/v1/credentials" 2>/dev/null \
+    | jq -r --arg n "${NOTION_CRED_NAME}" '
+        (if type=="array" then . else (.data // []) end)
+        | map(select(.name == $n)) | .[0].id // empty'
+)"
+
+if [[ -z "${NOTION_CRED_ID}" ]]; then
+  cat <<EOF >&2
+  ✗ No '${NOTION_CRED_NAME}' credential found.
+    Create one manually in the n8n UI:
+      1. ${N8N_BASE_URL}/home/credentials → + Add credential
+      2. Type: Notion API
+      3. Name: ${NOTION_CRED_NAME}
+      4. Internal Integration Secret from https://www.notion.so/my-integrations
+      5. Connect the integration to the Shorts EO DB:
+         https://www.notion.so/34028224657180d8951bcc555a2c66b8
+         (⋯ menu → Connections → Connect to → your integration)
+    Then re-run this script.
+EOF
+  exit 2
 fi
+echo "  ✓ using existing credential id=${NOTION_CRED_ID}"
 
-# n8n's POST /workflows endpoint rejects extra top-level keys like `active`,
-# `pinData`, or `staticData`. Strip them to the whitelist: name/nodes/connections/settings.
-PAYLOAD="$(jq '{name, nodes, connections, settings}' "${WORKFLOW_FILE}")"
+# --- 3. Substitute credential IDs into the workflow JSON ---------------------
+echo "→ Building workflow payload with resolved credential ids..."
+PAYLOAD="$(
+  jq --arg pf "${POSTFAST_CRED_ID}" --arg no "${NOTION_CRED_ID}" '
+    .nodes |= map(
+      if (.credentials.httpHeaderAuth // null) != null then
+        .credentials.httpHeaderAuth.id = $pf
+      else . end
+      | if (.credentials.notionApi // null) != null then
+          .credentials.notionApi.id = $no
+        else . end
+    )
+    | {name, nodes, connections, settings}
+  ' "${WORKFLOW_FILE}"
+)"
 
+# --- 4. Create or overwrite the workflow -------------------------------------
 EXISTING_ID="${TARGET_WORKFLOW_ID}"
 if [[ -z "${EXISTING_ID}" ]]; then
-  echo "→ Checking whether '${WORKFLOW_NAME}' already exists on ${N8N_BASE_URL}..."
+  echo "→ Checking whether '${WORKFLOW_NAME}' already exists..."
   EXISTING_ID="$(
-    curl -fsSL \
-      -H "X-N8N-API-KEY: ${N8N_API_KEY}" \
-      -H "Accept: application/json" \
-      "${N8N_BASE_URL}/api/v1/workflows" \
-      | jq -r --arg n "${WORKFLOW_NAME}" '.data[] | select(.name == $n) | .id' \
-      | head -n1
+    curl -fsSL -H "${AUTH_HEADER}" -H 'Accept: application/json' \
+      "${N8N_BASE_URL}/api/v1/workflows" 2>/dev/null \
+      | jq -r --arg n "${WORKFLOW_NAME}" '
+          (if type=="array" then . else (.data // []) end)
+          | map(select(.name == $n)) | .[0].id // empty'
   )"
 fi
 
+FRESHLY_CREATED="false"
 if [[ -n "${EXISTING_ID}" ]]; then
-  echo "→ Updating workflow id=${EXISTING_ID} (PUT)..."
-  RESPONSE="$(
-    curl -fsSL \
-      -X PUT \
-      -H "X-N8N-API-KEY: ${N8N_API_KEY}" \
-      -H "Content-Type: application/json" \
-      --data "${PAYLOAD}" \
-      "${N8N_BASE_URL}/api/v1/workflows/${EXISTING_ID}"
-  )"
-  echo "${RESPONSE}" | jq '{id, name, updatedAt}'
+  echo "→ Overwriting workflow id=${EXISTING_ID} (PUT)..."
+  RESULT="$(n8n_api PUT "/api/v1/workflows/${EXISTING_ID}" "${PAYLOAD}")"
+  STATUS="$(echo "${RESULT}" | head -n1)"
+  RESPONSE="$(echo "${RESULT}" | tail -n +2)"
+  if [[ "${STATUS}" != "200" ]]; then
+    echo "${RESPONSE}" >&2
+    die "workflow update failed (HTTP ${STATUS})."
+  fi
   NEW_ID="${EXISTING_ID}"
 else
-  echo "→ No existing workflow. Creating (POST)..."
-  RESPONSE="$(
-    curl -fsSL \
-      -X POST \
-      -H "X-N8N-API-KEY: ${N8N_API_KEY}" \
-      -H "Content-Type: application/json" \
-      --data "${PAYLOAD}" \
-      "${N8N_BASE_URL}/api/v1/workflows"
-  )"
-  NEW_ID="$(echo "${RESPONSE}" | jq -r '.id')"
-  echo "${RESPONSE}" | jq '{id, name, createdAt}'
+  echo "→ Creating new workflow (POST)..."
+  RESULT="$(n8n_api POST "/api/v1/workflows" "${PAYLOAD}")"
+  STATUS="$(echo "${RESULT}" | head -n1)"
+  RESPONSE="$(echo "${RESULT}" | tail -n +2)"
+  if [[ "${STATUS}" != "200" && "${STATUS}" != "201" ]]; then
+    echo "${RESPONSE}" >&2
+    die "workflow creation failed (HTTP ${STATUS})."
+  fi
+  NEW_ID="$(echo "${RESPONSE}" | jq -r '.id // .data.id')"
+  FRESHLY_CREATED="true"
 fi
 
-# If a project was specified AND we created a fresh workflow, move it into the
-# project. n8n Cloud / Enterprise exposes this endpoint; Community edition
-# ignores projects entirely so a 404 here is non-fatal.
-if [[ -n "${N8N_PROJECT_ID}" && -z "${TARGET_WORKFLOW_ID}" ]]; then
+echo "${RESPONSE}" | jq '{id, name}' 2>/dev/null || true
+
+# --- 5. Transfer to project (only on fresh creation, best effort) -----------
+if [[ "${FRESHLY_CREATED}" == "true" && -n "${N8N_PROJECT_ID}" ]]; then
   echo "→ Transferring workflow ${NEW_ID} to project ${N8N_PROJECT_ID}..."
-  HTTP_CODE="$(
-    curl -sS -o /tmp/n8n_transfer.out -w '%{http_code}' \
-      -X PUT \
-      -H "X-N8N-API-KEY: ${N8N_API_KEY}" \
-      -H "Content-Type: application/json" \
-      --data "{\"destinationProjectId\": \"${N8N_PROJECT_ID}\"}" \
-      "${N8N_BASE_URL}/api/v1/workflows/${NEW_ID}/transfer" || echo 000
-  )"
-  if [[ "${HTTP_CODE}" == "200" || "${HTTP_CODE}" == "204" ]]; then
+  TRANSFER_BODY="$(jq -n --arg p "${N8N_PROJECT_ID}" '{destinationProjectId: $p}')"
+  RESULT="$(n8n_api PUT "/api/v1/workflows/${NEW_ID}/transfer" "${TRANSFER_BODY}")"
+  STATUS="$(echo "${RESULT}" | head -n1)"
+  if [[ "${STATUS}" == "200" || "${STATUS}" == "204" ]]; then
     echo "  ✓ transferred."
   else
-    echo "  ! transfer returned HTTP ${HTTP_CODE} (ignorable on Community edition):"
-    cat /tmp/n8n_transfer.out 2>/dev/null || true
-    echo ""
+    echo "  ! transfer returned HTTP ${STATUS} (ignorable on n8n Community edition)."
   fi
 fi
 
 echo ""
-echo "✓ Workflow ready. Open it:"
+echo "✓ Deployed. Open the workflow:"
 echo "  ${N8N_BASE_URL}/workflow/${NEW_ID}"
-
 echo ""
-echo "Next steps (manual, one time):"
-echo "  1. In the n8n UI, configure these credentials if not already done:"
-echo "     - 'Notion API' (notionApi) — Internal Integration Token"
-echo "     - 'PostFast API' (httpHeaderAuth) — Header name 'Authorization',"
-echo "       value 'Bearer KWn4JvZyT6HwerFf+SPdFX56OiIhuykHJmGGfWsnmpg='"
-echo "  2. Set the POSTFAST_API_URL env var in n8n (Settings → Variables)"
-echo "     to your PostFast scheduling endpoint."
-echo "  3. Re-assign the credentials on the three affected nodes (n8n can't"
-echo "     map credential IDs across instances automatically)."
-echo "  4. Run once manually to validate, then toggle the workflow Active."
+echo "Next steps:"
+echo "  • Run it once manually (Execute Workflow button) on a test short."
+echo "  • When green, toggle it Active (top-right) so the weekly cron fires."
