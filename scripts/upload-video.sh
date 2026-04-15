@@ -10,18 +10,21 @@
 #   POSTFAST_API_KEY   raw PostFast key (pf-api-key header value)
 #
 # Optional env var:
-#   CONTENT_TYPE       defaults to video/mp4
+#   CONTENT_TYPE       overrides auto-detection. Defaults to auto-detect
+#                      from the file extension (.mp4, .mov, .m4v, .webm,
+#                      .jpg, .jpeg, .png, .gif, .webp).
 #
 # Usage:
 #   export POSTFAST_API_KEY="tuk7TzAI..."
 #   bash scripts/upload-video.sh path/to/short-42.mp4
 #
-# For image uploads pass CONTENT_TYPE=image/jpeg or image/png.
+# For files with spaces/special chars in macOS, the easiest way is to
+# type `bash scripts/upload-video.sh ` (with trailing space) then drag
+# the file from Finder into Terminal — macOS inserts the escaped path.
 
 set -euo pipefail
 
 FILE="${1:-}"
-CONTENT_TYPE="${CONTENT_TYPE:-video/mp4}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -30,6 +33,23 @@ die() { echo "error: $*" >&2; exit 1; }
 [[ -n "${POSTFAST_API_KEY:-}" ]]   || die "POSTFAST_API_KEY is not set."
 command -v curl >/dev/null 2>&1    || die "curl is required."
 command -v jq >/dev/null 2>&1      || die "jq is required."
+
+# Auto-detect content-type from extension unless overridden.
+if [[ -z "${CONTENT_TYPE:-}" ]]; then
+  EXT_LC="$(echo "${FILE##*.}" | tr '[:upper:]' '[:lower:]')"
+  case "${EXT_LC}" in
+    mp4)           CONTENT_TYPE="video/mp4" ;;
+    mov|qt)        CONTENT_TYPE="video/quicktime" ;;
+    m4v)           CONTENT_TYPE="video/x-m4v" ;;
+    webm)          CONTENT_TYPE="video/webm" ;;
+    jpg|jpeg)      CONTENT_TYPE="image/jpeg" ;;
+    png)           CONTENT_TYPE="image/png" ;;
+    gif)           CONTENT_TYPE="image/gif" ;;
+    webp)          CONTENT_TYPE="image/webp" ;;
+    *)             die "unknown extension .${EXT_LC}. Set CONTENT_TYPE=... manually." ;;
+  esac
+fi
+
 
 # PostFast limits: 250 MB for video, 10 MB for images.
 FILE_BYTES="$(stat -c '%s' "${FILE}" 2>/dev/null || stat -f '%z' "${FILE}")"
