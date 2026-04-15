@@ -30,7 +30,7 @@ A short with all four markers (`YT:`/`SM:`/`LI:`/`X:`) fires **5 PostFast calls*
 
 ## Notion database contract
 
-The workflow queries the [Shorts EO — Weekly Posting Planning](https://www.notion.so/34028224657180d8951bcc555a2c66b8) DB (`collection://34028224-6571-8134-b90a-000b65a6d13e`). Each short (Notion page) is expected to have:
+The workflow queries the [Shorts EO — Weekly Posting Planning](https://www.notion.so/45328224657182cfafe181046d7f5d2c) DB (`collection://0bd28224-6571-827b-8a89-07fed5b4cd84`). Each short (Notion page) is expected to have:
 
 | Property | Type | Purpose |
 |---|---|---|
@@ -54,7 +54,7 @@ Output:
 ✓ Upload complete.
 
 Paste this into the 'PostFast Media Key' column of the corresponding
-Notion short (https://www.notion.so/34028224657180d8951bcc555a2c66b8):
+Notion short (https://www.notion.so/45328224657182cfafe181046d7f5d2c):
 
   video/a7b8c9d1-e2f3-4567-8901-23456789abcd.mp4
 ```
@@ -69,7 +69,7 @@ The n8n public API can't create Notion credentials programmatically, so this is 
 
 1. Go to <https://www.notion.so/my-integrations> → **+ New integration**, workspace-internal, with **Read + Update content** capabilities.
 2. Copy the **Internal Integration Secret**.
-3. Open the DB page <https://www.notion.so/34028224657180d8951bcc555a2c66b8> → `⋯` → **Connections → Connect to →** your new integration.
+3. Open the DB page <https://www.notion.so/45328224657182cfafe181046d7f5d2c> → `⋯` → **Connections → Connect to →** your new integration.
 4. In n8n (`http://72.62.187.71:5678/home/credentials`) → **+ Add credential → Notion API**, paste the secret, name it exactly `Notion API`.
 
 ### 2. Copy the Notion credential UUID
