@@ -69,16 +69,6 @@
               "key": "Kind|status",
               "condition": "equals",
               "statusValue": "Ready"
-            },
-            {
-              "key": "Date de Publication|date",
-              "condition": "onOrAfter",
-              "date": "={{ $now.toISODate() }}"
-            },
-            {
-              "key": "Date de Publication|date",
-              "condition": "onOrBefore",
-              "date": "={{ $now.plus({ days: 7 }).toISODate() }}"
             }
           ]
         }
