@@ -1,0 +1,221 @@
+{
+  "name": "EO Shorts Auto-Publisher",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 20 * * 0"
+            }
+          ]
+        }
+      },
+      "id": "b1a1c5e0-0001-4000-8000-000000000001",
+      "name": "Schedule Trigger (weekly Sun 20:00)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "34028224-6571-8134-b90a-000b65a6d13e",
+          "mode": "id"
+        },
+        "returnAll": true,
+        "simple": true,
+        "filterType": "manual",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "key": "Back-up|status",
+              "condition": "equals",
+              "statusValue": "Ready"
+            },
+            {
+              "key": "Date de Publication|date",
+              "condition": "onOrAfter",
+              "date": "={{ $now.toISODate() }}"
+            },
+            {
+              "key": "Date de Publication|date",
+              "condition": "onOrBefore",
+              "date": "={{ $now.plus({ days: 7 }).toISODate() }}"
+            }
+          ]
+        }
+      },
+      "id": "b1a1c5e0-0002-4000-8000-000000000002",
+      "name": "Notion — Query Shorts (Ready, this week)",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [480, 300],
+      "credentials": {
+        "notionApi": {
+          "id": "REPLACE_WITH_NOTION_CRED_ID",
+          "name": "Notion API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "language": "javaScript",
+        "jsCode": "// Explode each Notion short into one item per PostFast platform post.\n// Description field contains per-platform captions prefixed by YT:, SM:, LI:, X:\n// SM fans out to Instagram + TikTok (same caption).\n\nconst PLATFORM_MAP = {\n  YT: ['youtube'],\n  SM: ['instagram', 'tiktok'],\n  LI: ['linkedin'],\n  X:  ['twitter'],\n};\n\nconst props = $json.properties || $json;\n\nconst title = (props['Titre'] && (props['Titre'].title || props['Titre'])) || $json['Titre'] || '';\nconst description = (props['Description'] && (props['Description'].rich_text || props['Description'])) || $json['Description'] || '';\nconst dateRaw = (props['Date de Publication'] && (props['Date de Publication'].date || props['Date de Publication'])) || $json['Date de Publication'] || null;\nconst notionPageId = $json.id || $json.url || '';\n\nconst descText = typeof description === 'string'\n  ? description\n  : (Array.isArray(description) ? description.map(r => r.plain_text || r.text || '').join('') : String(description ?? ''));\n\nconst titleText = typeof title === 'string'\n  ? title\n  : (Array.isArray(title) ? title.map(r => r.plain_text || r.text || '').join('') : String(title ?? ''));\n\nconst scheduledAt = typeof dateRaw === 'string'\n  ? dateRaw\n  : (dateRaw && dateRaw.start) ? dateRaw.start : null;\n\n// Split description on platform markers at line start (allow both newlines and start of string).\n// We capture the prefix with a lookahead-style split so we keep track of boundaries.\nconst BLOCK_REGEX = /(^|\\n)\\s*(YT|SM|LI|X)\\s*:\\s*/g;\nconst matches = [];\nlet m;\nwhile ((m = BLOCK_REGEX.exec(descText)) !== null) {\n  matches.push({ prefix: m[2], start: m.index + m[0].length });\n}\n\nconst blocks = [];\nfor (let i = 0; i < matches.length; i++) {\n  const end = i + 1 < matches.length ? matches[i + 1].start - (matches[i + 1].prefix.length + 2) : descText.length;\n  let caption = descText.slice(matches[i].start, end).trim();\n  // Strip the \"| Tags: ...\" trailer that exists on the YT block.\n  caption = caption.replace(/\\s*\\|\\s*Tags\\s*:.*$/is, '').trim();\n  blocks.push({ prefix: matches[i].prefix, caption });\n}\n\nconst output = [];\nfor (const { prefix, caption } of blocks) {\n  const platforms = PLATFORM_MAP[prefix] || [];\n  for (const platform of platforms) {\n    output.push({\n      json: {\n        notionPageId,\n        title: titleText,\n        scheduledAt,\n        platform,\n        caption,\n      },\n    });\n  }\n}\n\nreturn output;\n"
+      },
+      "id": "b1a1c5e0-0003-4000-8000-000000000003",
+      "name": "Code — Explode Platforms",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.POSTFAST_API_URL }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"scheduledAt\": \"{{ $json.scheduledAt }}\",\n  \"caption\": {{ JSON.stringify($json.caption) }},\n  \"platform\": \"{{ $json.platform }}\",\n  \"title\": {{ JSON.stringify($json.title) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          }
+        }
+      },
+      "id": "b1a1c5e0-0004-4000-8000-000000000004",
+      "name": "HTTP — PostFast Schedule",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 300],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_POSTFAST_CRED_ID",
+          "name": "PostFast API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "removeDuplicates",
+        "compare": "selectedFields",
+        "fieldsToCompare": "notionPageId"
+      },
+      "id": "b1a1c5e0-0005-4000-8000-000000000005",
+      "name": "Deduplicate by Notion Page ID",
+      "type": "n8n-nodes-base.itemLists",
+      "typeVersion": 3.1,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "update",
+        "pageId": {
+          "__rl": true,
+          "value": "={{ $json.notionPageId }}",
+          "mode": "id"
+        },
+        "simple": true,
+        "propertiesUi": {
+          "propertyValues": [
+            {
+              "key": "Back-up|status",
+              "statusValue": "Posted"
+            }
+          ]
+        }
+      },
+      "id": "b1a1c5e0-0006-4000-8000-000000000006",
+      "name": "Notion — Mark as Posted",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [1440, 300],
+      "credentials": {
+        "notionApi": {
+          "id": "REPLACE_WITH_NOTION_CRED_ID",
+          "name": "Notion API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger (weekly Sun 20:00)": {
+      "main": [
+        [
+          {
+            "node": "Notion — Query Shorts (Ready, this week)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notion — Query Shorts (Ready, this week)": {
+      "main": [
+        [
+          {
+            "node": "Code — Explode Platforms",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code — Explode Platforms": {
+      "main": [
+        [
+          {
+            "node": "HTTP — PostFast Schedule",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP — PostFast Schedule": {
+      "main": [
+        [
+          {
+            "node": "Deduplicate by Notion Page ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deduplicate by Notion Page ID": {
+      "main": [
+        [
+          {
+            "node": "Notion — Mark as Posted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Paris",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all"
+  },
+  "staticData": null,
+  "pinData": {}
+}
