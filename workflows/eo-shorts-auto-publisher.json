@@ -129,23 +129,11 @@
     },
     {
       "parameters": {
-        "operation": "removeDuplicates",
-        "compare": "selectedFields",
-        "fieldsToCompare": "notionPageId"
-      },
-      "id": "b1a1c5e0-0007-4000-8000-000000000007",
-      "name": "Deduplicate by Notion Page ID",
-      "type": "n8n-nodes-base.itemLists",
-      "typeVersion": 3.1,
-      "position": [1680, 300]
-    },
-    {
-      "parameters": {
         "resource": "databasePage",
         "operation": "update",
         "pageId": {
           "__rl": true,
-          "value": "={{ $json.notionPageId }}",
+          "value": "={{ $('Code — Explode Per Platform').item.json.notionPageId }}",
           "mode": "id"
         },
         "simple": true,
@@ -188,9 +176,6 @@
       "main": [[{ "node": "PostFast — Schedule Post (per platform)", "type": "main", "index": 0 }]]
     },
     "PostFast — Schedule Post (per platform)": {
-      "main": [[{ "node": "Deduplicate by Notion Page ID", "type": "main", "index": 0 }]]
-    },
-    "Deduplicate by Notion Page ID": {
       "main": [[{ "node": "Notion — Mark as Posted", "type": "main", "index": 0 }]]
     }
   },
