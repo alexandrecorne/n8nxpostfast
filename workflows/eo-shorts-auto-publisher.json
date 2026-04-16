@@ -2,20 +2,11 @@
   "name": "EO Shorts Auto-Publisher",
   "nodes": [
     {
-      "parameters": {
-        "rule": {
-          "interval": [
-            {
-              "field": "cronExpression",
-              "expression": "0 20 * * 0"
-            }
-          ]
-        }
-      },
+      "parameters": {},
       "id": "b1a1c5e0-0001-4000-8000-000000000001",
-      "name": "Schedule Trigger (weekly Sun 20:00)",
-      "type": "n8n-nodes-base.scheduleTrigger",
-      "typeVersion": 1.2,
+      "name": "When clicking 'Execute Workflow'",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
       "position": [240, 300]
     },
     {
@@ -160,7 +151,7 @@
     }
   ],
   "connections": {
-    "Schedule Trigger (weekly Sun 20:00)": {
+    "When clicking 'Execute Workflow'": {
       "main": [[{ "node": "PostFast — Fetch Social Accounts", "type": "main", "index": 0 }]]
     },
     "PostFast — Fetch Social Accounts": {
